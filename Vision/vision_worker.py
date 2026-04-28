@@ -2,7 +2,9 @@ import cv2
 import time
 import requests
 import os
+from datetime import datetime
 from ultralytics import YOLO
+import mediapipe as mp
 
 # ==========================================
 # ⚙️ 설정
@@ -12,72 +14,217 @@ LLM_SERVER_URL = "http://127.0.0.1:8000/vision"
 # 🧠 YOLO 모델 설정
 YOLO_MODEL_PATH = "best.pt" 
 
-# 🖼️ 카메라 대신 사용할 이미지 파일명
-IMAGE_PATH = "test_img.jpg"
+# 📷 카메라 설정 (0: 기본 웹캠)
+CAMERA_INDEX = 0
+
+# ⏱️ 안정화 대기 시간 (초)
+STABLE_DURATION = 3.0  
+
+# ------------------------------------------
+# ✋ MediaPipe 손 인식 설정
+# ------------------------------------------
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(
+    min_detection_confidence=0.7, 
+    min_tracking_confidence=0.7, 
+    max_num_hands=1  # 한 손만 인식
+)
+mp_draw = mp.solutions.drawing_utils
+
+def detect_gesture(hand_landmarks):
+    """
+    손가락 관절의 Y 좌표를 기반으로 제스처를 판별합니다.
+    """
+    lm = hand_landmarks.landmark
+    fingers = []
+    
+    # 검지(8), 중지(12), 약지(16), 소지(20)가 펴져 있는지 확인
+    # Tip(끝)이 PIP(중간관절)와 MCP(뿌리관절)보다 위에 있으면 펴진 것으로 간주 (y좌표는 위가 0)
+    for tip, pip, mcp in [(8,6,5), (12,10,9), (16,14,13), (20,18,17)]:
+        if lm[tip].y < lm[pip].y and lm[tip].y < lm[mcp].y:
+            fingers.append(1)
+        else:
+            fingers.append(0)
+            
+    # 엄지(4)가 펴져 있는지 확인 (엄지 끝이 검지 뿌리(5)보다 확연히 높이 있는지)
+    thumb_up = lm[4].y < lm[3].y and lm[4].y < lm[5].y
+    
+    if fingers == [0, 0, 0, 0] and thumb_up:
+        return "THUMBS_UP"  # 👍 엄지 척 (진행)
+    elif fingers == [1, 1, 0, 0]:
+        return "PEACE"      # ✌️ 브이 (캡처)
+    elif fingers == [0, 0, 0, 0] and not thumb_up:
+        return "FIST"       # ✊ 주먹 (거절/다시탐지)
+    
+    return "NONE"
 
 def run_vision():
-    # 필수 파일 확인
     if not os.path.exists(YOLO_MODEL_PATH):
-        print(f"❌ [Vision] '{YOLO_MODEL_PATH}' 파일을 찾을 수 없습니다. 훈련된 모델 파일을 Vision 폴더에 넣어주세요.")
-        return
-    if not os.path.exists(IMAGE_PATH):
-        print(f"❌ [Vision] '{IMAGE_PATH}' 파일을 찾을 수 없습니다. 이미지를 Vision 폴더에 넣어주세요.")
+        print(f"❌ [Vision] '{YOLO_MODEL_PATH}' 파일을 찾을 수 없습니다.")
         return
 
     # YOLO 모델 로드
     try:
         model = YOLO(YOLO_MODEL_PATH)
     except Exception as e:
-        print(f"❌ [Vision] YOLO 모델 로드 중 오류 발생: {e}")
-        print("💡 'ultralytics' 라이브러리가 설치되어 있는지 확인해주세요. (pip install ultralytics)")
+        print(f"❌ [Vision] YOLO 모델 로드 오류: {e}")
         return
         
-    print(f"👁️ [Vision] YOLO 모드 시작: {IMAGE_PATH}")
+    print(f"👁️ [Vision] 실시간 웹캠 객체 및 제스처 탐지 시작")
     
-    frame = cv2.imread(IMAGE_PATH)
-    if frame is None:
-        print("⚠️ [Vision] 이미지를 로드할 수 없습니다.")
+    cap = cv2.VideoCapture(CAMERA_INDEX)
+    if not cap.isOpened():
+        print("⚠️ [Vision] 카메라를 열 수 없습니다.")
         return
 
-    # 1. Ultralytics YOLO 모델로 객체 탐지
-    try:
-        results = model(frame)
-    except Exception as e:
-        print(f"⚠️ [Vision] 객체 탐지 중 오류 발생: {e}")
-        return
+    # 상태 관리
+    STATE = "DETECTING"  # 현재 상태 (DETECTING: 재료 탐지 중 / WAITING_CONFIRM: 사용자 확인 대기)
+    last_sent_ingredients = set()
+    current_stable_ingredients = set()
+    stable_start_time = time.time()
+    
+    capture_cooldown = 0
+    feedback_message = ""
+    feedback_time = 0
 
-    current_ingredients = []
+    print("========================================")
+    print("👋 [사용 가능 제스처]")
+    print(" 👍 엄지척 : 다음으로 진행 (LLM 확인 답변)")
+    print(" ✊ 주먹   : 다시 탐지 (LLM 거절 답변)")
+    print(" ✌️ 브이   : 화면 캡처")
+    print("========================================")
 
-    # 2. 결과 처리
-    for box in results[0].boxes:
-        confidence = box.conf[0]
-        if confidence > 0.4:
-            class_id = int(box.cls[0])
-            class_name = model.names[class_id]
-            current_ingredients.append(class_name)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        current_time = time.time()
+        current_gesture = "NONE"
 
-            # 바운딩 박스 좌표 및 시각화
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"{class_name}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # ------------------------------------------
+        # 1. MediaPipe 손 제스처 인식 로직
+        # ------------------------------------------
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        result_hands = hands.process(rgb_frame)
+        
+        if result_hands.multi_hand_landmarks:
+            for hand_landmarks in result_hands.multi_hand_landmarks:
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                current_gesture = detect_gesture(hand_landmarks)
+                
+                # 손모양을 화면에 표시
+                cv2.putText(frame, f"Gesture: {current_gesture}", (10, 70), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+        
+        # ✌️ 브이 (화면 캡처 로직) - 상태에 상관없이 작동
+        if current_gesture == "PEACE" and (current_time - capture_cooldown) > 3.0:
+            os.makedirs("captures", exist_ok=True)
+            filename = f"captures/capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            cv2.imwrite(filename, frame)
+            capture_cooldown = current_time
+            feedback_message = f"Captured! ({filename})"
+            feedback_time = current_time
+            print(f"📸 [Vision] 화면이 캡처되었습니다: {filename}")
 
-    unique_ingredients = list(set(current_ingredients))
+        # ------------------------------------------
+        # 2. 상태별 처리 로직
+        # ------------------------------------------
+        if STATE == "DETECTING":
+            # YOLO 객체 탐지
+            results = model(frame, verbose=False)
+            current_ingredients = []
+            
+            for box in results[0].boxes:
+                confidence = box.conf[0]
+                if confidence > 0.4:
+                    class_id = int(box.cls[0])
+                    class_name = model.names[class_id]
+                    current_ingredients.append(class_name)
 
-    # 3. 서버 전송
-    if unique_ingredients:
-        print(f"📡 [Vision -> LLM] 업데이트 전송: {unique_ingredients}")
-        try:
-            requests.post(LLM_SERVER_URL, json={"ingredients": unique_ingredients}, timeout=3)
-            print("✅ 전송 완료.")
-        except requests.exceptions.RequestException:
-            print("⚠️ [Vision] LLM 서버 연결 불가")
-    else:
-        print("ℹ️ [Vision] 탐지된 재료가 없습니다.")
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, f"{class_name} {confidence:.2f}", (x1, y1 - 10), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-    # 화면에 결과 보여주기
-    cv2.imshow("Robot Eye (YOLO Mode)", frame)
-    print("ℹ️ [Vision] 3초 후 창을 닫습니다...")
-    cv2.waitKey(3000)
+            current_ingredients_set = set(current_ingredients)
+
+            # 안정화 로직
+            if current_ingredients_set != current_stable_ingredients:
+                current_stable_ingredients = current_ingredients_set
+                stable_start_time = current_time
+            else:
+                if len(current_stable_ingredients) > 0:
+                    elapsed_stable_time = current_time - stable_start_time
+                    if elapsed_stable_time >= STABLE_DURATION:
+                        if current_stable_ingredients != last_sent_ingredients:
+                            # 3초 안정화 완료 -> LLM에게 물어봐달라고 신호 보냄
+                            print(f"📡 [Vision -> LLM] 확인 요청: {list(current_stable_ingredients)}")
+                            try:
+                                requests.post(LLM_SERVER_URL, json={
+                                    "action": "ask_confirmation",
+                                    "ingredients": list(current_stable_ingredients)
+                                }, timeout=3)
+                            except:
+                                print("⚠️ [Vision] LLM 서버 연결 불가")
+                            
+                            STATE = "WAITING_CONFIRM"
+                            feedback_message = "LLM Asking... (👍:Yes / ✊:No)"
+                            feedback_time = current_time
+                else:
+                    if len(last_sent_ingredients) > 0 and (current_time - stable_start_time) >= STABLE_DURATION:
+                        last_sent_ingredients = set()
+
+            # 안정화 진행 시간 화면 표시
+            if len(current_stable_ingredients) > 0 and current_stable_ingredients != last_sent_ingredients and STATE == "DETECTING":
+                remain_time = max(0.0, STABLE_DURATION - (current_time - stable_start_time))
+                cv2.putText(frame, f"Wait... {remain_time:.1f}s", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+        elif STATE == "WAITING_CONFIRM":
+            # 확인 대기 상태 화면 UI
+            cv2.putText(frame, "[WAITING] LLM Asking...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 165, 255), 2)
+            cv2.putText(frame, "[👍] YES / Proceed   [✊] NO / Retry", (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
+            
+            # 사용자 답변 제스처 처리
+            if current_gesture == "THUMBS_UP":
+                print("✅ [Vision] 👍 사용자 승인! 다음 단계 진행.")
+                try:
+                    requests.post(LLM_SERVER_URL, json={
+                        "action": "confirm",
+                        "ingredients": list(current_stable_ingredients)
+                    }, timeout=3)
+                except:
+                    pass
+                last_sent_ingredients = current_stable_ingredients
+                STATE = "DETECTING"
+                current_stable_ingredients = set()
+                feedback_message = "Confirmed!"
+                feedback_time = current_time
+                
+            elif current_gesture == "FIST":
+                print("🔄 [Vision] ✊ 사용자 거절! 탐지를 다시 시작합니다.")
+                try:
+                    requests.post(LLM_SERVER_URL, json={"action": "reject"}, timeout=3)
+                except:
+                    pass
+                STATE = "DETECTING"
+                current_stable_ingredients = set()
+                stable_start_time = current_time
+                feedback_message = "Retrying..."
+                feedback_time = current_time
+
+        # 피드백 메시지를 2초간 띄워줌 (캡처완료, 확정됨 등)
+        if current_time - feedback_time < 2.0:
+            cv2.putText(frame, feedback_message, (10, frame.shape[0] - 20), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+        cv2.imshow("Robot Eye (YOLO + Hands)", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            print("🛑 [Vision] 종료됨.")
+            break
+
+    cap.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
