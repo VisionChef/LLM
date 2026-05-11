@@ -20,6 +20,9 @@ YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_WATCH_URL = "https://www.youtube.com/watch?v="
 YOUTUBE_EMBED_URL = "https://www.youtube.com/embed/"
 MODULE_DIR = Path(__file__).resolve().parent
+os.environ.setdefault("HF_HOME", str(MODULE_DIR / "hf_cache"))
+os.environ.setdefault("HF_HUB_DISABLE_EXPERIMENTAL_XET", "1")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 _WHISPER_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 
 
@@ -56,6 +59,7 @@ class YouTubeRecommendationConfig:
     asr_device: str = "cpu"
     asr_compute_type: str = "int8"
     asr_cache_dir: str = str(MODULE_DIR / "youtube_transcript_cache")
+    asr_model_cache_dir: str = str(MODULE_DIR / "youtube_model_cache")
 
 
 DEFAULT_CONFIG = YouTubeRecommendationConfig(
@@ -67,6 +71,7 @@ DEFAULT_CONFIG = YouTubeRecommendationConfig(
     asr_device=os.getenv("YOUTUBE_ASR_DEVICE", "cpu"),
     asr_compute_type=os.getenv("YOUTUBE_ASR_COMPUTE_TYPE", "int8"),
     asr_cache_dir=os.getenv("YOUTUBE_ASR_CACHE_DIR", str(MODULE_DIR / "youtube_transcript_cache")),
+    asr_model_cache_dir=os.getenv("YOUTUBE_ASR_MODEL_CACHE_DIR", str(MODULE_DIR / "youtube_model_cache")),
 )
 
 
@@ -358,13 +363,24 @@ def _get_whisper_model(config: YouTubeRecommendationConfig) -> Optional[Any]:
     except ImportError:
         return None
 
-    key = (config.asr_model_name, config.asr_device, config.asr_compute_type)
+    key = (
+        config.asr_model_name,
+        config.asr_device,
+        config.asr_compute_type,
+        config.asr_model_cache_dir,
+    )
     if key not in _WHISPER_MODEL_CACHE:
-        _WHISPER_MODEL_CACHE[key] = WhisperModel(
-            config.asr_model_name,
-            device=config.asr_device,
-            compute_type=config.asr_compute_type,
-        )
+        try:
+            Path(config.asr_model_cache_dir).mkdir(parents=True, exist_ok=True)
+            _WHISPER_MODEL_CACHE[key] = WhisperModel(
+                config.asr_model_name,
+                device=config.asr_device,
+                compute_type=config.asr_compute_type,
+                download_root=config.asr_model_cache_dir,
+            )
+        except Exception as exc:
+            print(f"⚠️ [YouTube ASR] Whisper 모델 로드/다운로드 실패: {exc}")
+            return None
 
     return _WHISPER_MODEL_CACHE[key]
 
