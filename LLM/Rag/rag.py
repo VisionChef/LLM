@@ -18,6 +18,9 @@ os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 os.environ["HF_HUB_ENABLE_TQDM_MULTIPROCESSING"] = "0"
 os.environ["HF_HOME"] = os.environ.get("HF_HOME", r"C:\hf_cache_clean")
+if os.getenv("RAG_ALLOW_DOWNLOAD", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 # ─────────────────────────────────────
 # 경로 설정
@@ -181,7 +184,13 @@ def normalize_ingredient(text: str) -> str:
 # 임베딩 모델
 # ─────────────────────────────────────
 def get_embeddings() -> HuggingFaceEmbeddings:
-    return HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
+    model_name = os.getenv("RAG_EMBEDDING_MODEL", "BAAI/bge-m3")
+    allow_download = os.getenv("RAG_ALLOW_DOWNLOAD", "0").strip().lower() in {"1", "true", "yes", "on"}
+    return HuggingFaceEmbeddings(
+        model_name=model_name,
+        cache_folder=os.getenv("HF_HOME"),
+        model_kwargs={"local_files_only": not allow_download},
+    )
 
 
 # ─────────────────────────────────────

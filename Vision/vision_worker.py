@@ -2,10 +2,15 @@ import cv2
 import time
 import requests
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from ultralytics import YOLO
 import mediapipe as mp
+
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
 
 # ==========================================
 # ⚙️ 설정

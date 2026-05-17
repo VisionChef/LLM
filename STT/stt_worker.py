@@ -1,9 +1,14 @@
 import speech_recognition as sr
 import os
 import requests
+import sys
 import time
 import webbrowser
 from typing import Optional
+
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
 
 # ==========================================
 # ⚙️ 설정

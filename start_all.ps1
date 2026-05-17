@@ -3,6 +3,7 @@ param(
     [int]$FrontPort = 3000,
     [switch]$NoFront,
     [switch]$NoSTT,
+    [switch]$WithSTT,
     [switch]$NoVision,
     [switch]$NoWait
 )
@@ -238,12 +239,15 @@ if (-not $NoWait) {
     Wait-LLMServer -Port $Port
 }
 
-if (-not $NoSTT) {
+if ($WithSTT -and -not $NoSTT) {
     Start-ProjectWindow `
         -Title "NLP-jm STT" `
         -WorkingDirectory (Join-Path $Root "STT") `
         -CommandTail "stt_worker.py" `
         -Python $python
+}
+else {
+    Write-Host "Legacy STT worker skipped. The browser UI uses one-shot voice input."
 }
 
 if (-not $NoVision) {

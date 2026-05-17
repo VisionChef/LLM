@@ -34,6 +34,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    # 윈도우 환경에서 이모지 등 출력 시 cp949 인코딩 에러 방지
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     args = parse_args()
     if not args.api_key:
         print("YOUTUBE_API_KEY is required. Set it in the environment or pass --api-key.", file=sys.stderr)

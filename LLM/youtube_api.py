@@ -24,6 +24,11 @@ os.environ.setdefault("HF_HOME", str(MODULE_DIR / "hf_cache"))
 os.environ.setdefault("HF_HUB_DISABLE_EXPERIMENTAL_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 _WHISPER_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
+_LAST_YOUTUBE_ERROR = ""
+
+
+def get_last_youtube_error() -> str:
+    return _LAST_YOUTUBE_ERROR
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -63,8 +68,8 @@ class YouTubeRecommendationConfig:
 
 
 DEFAULT_CONFIG = YouTubeRecommendationConfig(
-    allow_metadata_fallback=_env_flag("YOUTUBE_METADATA_FALLBACK", False),
-    enable_asr_fallback=_env_flag("YOUTUBE_ASR_FALLBACK", True),
+    allow_metadata_fallback=_env_flag("YOUTUBE_METADATA_FALLBACK", True),
+    enable_asr_fallback=_env_flag("YOUTUBE_ASR_FALLBACK", False),
     asr_max_videos=_env_int("YOUTUBE_ASR_MAX_VIDEOS", 2),
     asr_model_name=os.getenv("YOUTUBE_ASR_MODEL", "small"),
     asr_language=os.getenv("YOUTUBE_ASR_LANGUAGE", "ko"),
@@ -185,6 +190,9 @@ def search_youtube_videos(
     api_key: str,
     config: YouTubeRecommendationConfig = DEFAULT_CONFIG,
 ) -> list[dict[str, Any]]:
+    global _LAST_YOUTUBE_ERROR
+    _LAST_YOUTUBE_ERROR = ""
+
     if not api_key:
         return []
 
@@ -205,9 +213,15 @@ def search_youtube_videos(
         response = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=config.timeout_seconds)
         response.raise_for_status()
         data = response.json()
-    except RequestException:
+    except RequestException as exc:
+        response = getattr(exc, "response", None)
+        if response is not None:
+            _LAST_YOUTUBE_ERROR = f"{response.status_code}: {response.text[:300]}"
+        else:
+            _LAST_YOUTUBE_ERROR = str(exc)
         return []
-    except ValueError:
+    except ValueError as exc:
+        _LAST_YOUTUBE_ERROR = f"Invalid JSON response: {exc}"
         return []
 
     videos = []
@@ -613,6 +627,10 @@ def is_cooking_video_query(text: str) -> bool:
         "보여주세요",
         "틀어줘",
         "틀어주세요",
+        "나와",
+        "나오는",
+        "찾아줘",
+        "추천해줘",
         "시연",
         "demo",
         "recipe",
@@ -630,6 +648,9 @@ def is_cooking_video_query(text: str) -> bool:
         "볶는법",
         "삶는법",
         "끓이는법",
+        "불리는법",
+        "불리는",
+        "불리",
         "굽는법",
         "튀기는법",
         "까는법",
